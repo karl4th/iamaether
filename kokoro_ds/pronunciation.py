@@ -16,14 +16,14 @@ from __future__ import annotations
 import re
 
 # word (case-insensitive, whole-word match) -> IPA string for Kokoro's
-# "[word](/ipa/)" markup syntax.
+# "[word](/ipa/)" markup syntax. Only override words where Kokoro's default
+# G2P was confirmed wrong by listening (see COLAB.md section 6). Manifestro,
+# Almaty, Kazakhstan, and Moshi were tried and rejected on listening -
+# Kokoro's own default pronunciation for those is used instead (no entry
+# here means the word passes through unmodified).
 PRONUNCIATION_MAP: dict[str, str] = {
     "Aether": "ˈiːθɚ",
-    "Manifestro": "ˌmænɪˈfɛstroʊ",
-    "Almaty": "ˌɑːlˈmɑːti",
-    "Kazakhstan": "ˌkæzəkˈstæn",
     "Kyutai": "kjuːˈtaɪ",
-    "Moshi": "ˈmoʊʃiː",
 }
 
 QA_PHRASES: tuple[str, ...] = (

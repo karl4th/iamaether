@@ -68,11 +68,17 @@ def test_is_excessively_long():
 
 
 def test_apply_pronunciation_wraps_configured_words():
-    text = "I am Aether, not Moshi."
+    text = "I am Aether, not created by Kyutai."
     rewritten = apply_pronunciation(text, PRONUNCIATION_MAP)
     assert "[Aether](/" in rewritten
-    assert "[Moshi](/" in rewritten
+    assert "[Kyutai](/" in rewritten
     assert "not" in rewritten  # untouched words remain plain
+
+
+def test_apply_pronunciation_leaves_unconfigured_names_unmodified():
+    text = "Manifestro develops me in Almaty, Kazakhstan, not Moshi."
+    rewritten = apply_pronunciation(text, PRONUNCIATION_MAP)
+    assert rewritten == text
 
 
 def test_apply_pronunciation_is_case_insensitive_and_whole_word():
