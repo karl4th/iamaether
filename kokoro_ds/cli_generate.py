@@ -22,6 +22,7 @@ from .reporting import ProgressTracker
 from .schema import SourceRecord, ValidationError, validate_source_tree
 from .smoke import select_stratified_smoke
 from .voices_data import assert_voice_pools_valid
+from .worker import WorkItem
 
 DEFAULT_SOURCE_ROOT = "/content/drive/MyDrive/deepseek_batches"
 DEFAULT_OUTPUT_ROOT = "/content/drive/MyDrive/deepseek_batches/audio/aether_kokoro_v1"
@@ -46,6 +47,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--record-id", type=str, default=None, help="Generate/regenerate exactly one dialogue id, for debugging.")
     p.add_argument("--progress-every", type=int, default=5)
     p.add_argument("--device", type=str, default="cuda")
+    p.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help="Number of parallel GPU worker processes. This workload is latency-bound, not "
+        "compute-bound (an A100 sits mostly idle synthesizing one short utterance at a time), "
+        "so several workers overlap that latency and give a near-linear speedup. Each worker "
+        "loads its own model copy (~2-3GB VRAM); 6-8 is a reasonable starting point on an A100.",
+    )
     return p.parse_args(argv)
 
 
@@ -136,98 +146,190 @@ def _assert_runtime_ready() -> None:
     assert torch.cuda.is_available(), "CUDA is not available; run on a GPU (A100) Colab runtime."
 
 
+def _resolve_resume_state(
+    records: list[SourceRecord],
+    split: str,
+    split_dir: Path,
+    config: GenerationConfig,
+    seed: int,
+    receipt_store: ReceiptStore,
+    resume: bool,
+) -> tuple[list[SourceRecord], int]:
+    """Returns (records_still_needing_generation, count_already_valid_and_skipped)."""
+    if not resume:
+        return list(records), 0
+
+    to_process: list[SourceRecord] = []
+    already_good = 0
+    for record in records:
+        if receipt_store.is_completed(record.id):
+            user_voice = assign_user_voice(record.id, split, seed)
+            result = verify_existing_record(split_dir, record, split, user_voice, config, receipt_store)
+            if result.ok:
+                already_good += 1
+                continue
+            print(f"Resume check failed for {record.id}, regenerating: {result.reasons}")
+        to_process.append(record)
+    return to_process, already_good
+
+
+def _build_manifest_lines(records: list[SourceRecord], receipt_store: ReceiptStore) -> list[dict]:
+    lines = []
+    for r in records:
+        receipt = receipt_store.get_completed(r.id)
+        if receipt is not None:
+            lines.append(manifest_line(f"audio/{r.id}.wav", receipt["duration_seconds"]))
+    return lines
+
+
+def _run_sequential(
+    work_items: list[WorkItem],
+    args: argparse.Namespace,
+    config: GenerationConfig,
+    receipt_store: ReceiptStore,
+) -> tuple[int, int]:
+    from .kokoro_backend import assert_all_voices_available
+    from .pipeline import generate_one_record
+
+    backend, aligner = _build_backends(args.device)
+    assert_all_voices_available(backend)
+    environment = env_info.collect_environment(backend.model_identity(), aligner.model_identity())
+    atomic_write_json(args.output_root / "reports" / "provenance.json", {"seed": args.seed, "workers": 1, **environment})
+
+    tracker = ProgressTracker(total=len(work_items))
+    completed, failed = 0, 0
+
+    for i, item in enumerate(work_items):
+        split_dir = args.output_root / item.split
+        outcome = generate_one_record(
+            record=item.record,
+            split=item.split,
+            split_dir=split_dir,
+            config=config,
+            global_seed=args.seed,
+            synth_fn=backend.synthesize,
+            align_fn=aligner.align,
+            receipt_store=receipt_store,
+            environment=environment,
+            pronunciation_map=PRONUNCIATION_MAP,
+            keep_intermediate=args.keep_intermediate,
+        )
+        if outcome.success:
+            completed += 1
+            tracker.record_success(outcome.duration_seconds)
+        else:
+            failed += 1
+            tracker.record_failure()
+            receipt_store.mark_failed(
+                {"id": item.record.id, "split": item.split, "reasons": outcome.reasons, "timestamp": time.time()}
+            )
+            print(f"FAILED {item.record.id}: {outcome.reasons}")
+
+        if (i + 1) % max(1, args.progress_every) == 0 or (i + 1) == len(work_items):
+            print(tracker.line(item.split, item.record.id, env_info.gpu_memory_mb()))
+
+    return completed, failed
+
+
+def _run_parallel(
+    work_items: list[WorkItem],
+    args: argparse.Namespace,
+    config: GenerationConfig,
+) -> tuple[int, int]:
+    from .kokoro_backend import KokoroBackend, assert_all_voices_available
+    from .alignment_engine import ForcedAligner
+    from .worker import run_parallel
+
+    print(f"Running with {args.workers} parallel worker process(es)...")
+
+    # Probe voice availability and capture provenance once in the parent,
+    # before spawning workers, so a broken voice/model fails fast instead of
+    # every worker independently hitting (and downloading for) the same bug.
+    probe_backend = KokoroBackend(device=args.device)
+    assert_all_voices_available(probe_backend)
+    probe_aligner = ForcedAligner(device=args.device)
+    environment = env_info.collect_environment(probe_backend.model_identity(), probe_aligner.model_identity())
+    atomic_write_json(
+        args.output_root / "reports" / "provenance.json", {"seed": args.seed, "workers": args.workers, **environment}
+    )
+    del probe_backend, probe_aligner
+    try:
+        import torch
+
+        torch.cuda.empty_cache()
+    except ImportError:
+        pass
+
+    return run_parallel(
+        work_items=work_items,
+        output_root=args.output_root,
+        config=config,
+        global_seed=args.seed,
+        pronunciation_map=PRONUNCIATION_MAP,
+        keep_intermediate=args.keep_intermediate,
+        device=args.device,
+        n_workers=args.workers,
+        progress_every=args.progress_every,
+    )
+
+
 def run_generation(
     args: argparse.Namespace,
     records_by_split: dict[str, list[SourceRecord]],
     config: GenerationConfig = DEFAULT_CONFIG,
 ) -> int:
-    from .kokoro_backend import assert_all_voices_available
-    from .pipeline import generate_one_record
-
     _assert_runtime_ready()
     print_pronunciation_map(PRONUNCIATION_MAP)
-
-    backend, aligner = _build_backends(args.device)
-    assert_all_voices_available(backend)
-    environment = env_info.collect_environment(backend.model_identity(), aligner.model_identity())
-
     args.output_root.mkdir(parents=True, exist_ok=True)
-    atomic_write_json(args.output_root / "reports" / "provenance.json", {"seed": args.seed, **environment})
 
-    had_unresolved_failure = False
-    grand_total = sum(len(v) for v in records_by_split.values())
-    tracker = ProgressTracker(total=grand_total)
-    split_summaries: dict[str, dict] = {}
-
+    # Cheap, single-process, no-GPU pre-pass: decide what actually needs
+    # (re)generation before spending any GPU time or spawning workers.
+    receipt_store = ReceiptStore(args.output_root / "receipts")
+    work_items: list[WorkItem] = []
+    already_good_count = 0
     for split, records in records_by_split.items():
         split_dir = args.output_root / split
-        receipt_store = ReceiptStore(args.output_root / "receipts")
-        manifest_lines: dict[str, dict] = {}
+        to_process, already_good = _resolve_resume_state(records, split, split_dir, config, args.seed, receipt_store, args.resume)
+        already_good_count += already_good
+        work_items.extend(WorkItem(split, r) for r in to_process)
 
-        for i, record in enumerate(records):
-            already_good = False
-            if args.resume and receipt_store.is_completed(record.id):
-                user_voice = assign_user_voice(record.id, split, args.seed)
-                result = verify_existing_record(split_dir, record, split, user_voice, config, receipt_store)
-                if result.ok:
-                    already_good = True
-                    receipt = receipt_store.get_completed(record.id)
-                    tracker.record_success(receipt["duration_seconds"])
-                    manifest_lines[record.id] = manifest_line(f"audio/{record.id}.wav", receipt["duration_seconds"])
-                else:
-                    print(f"Resume check failed for {record.id}, regenerating: {result.reasons}")
+    print(f"{already_good_count} record(s) already valid and skipped; {len(work_items)} to (re)generate.")
 
-            if not already_good:
-                outcome = generate_one_record(
-                    record=record,
-                    split=split,
-                    split_dir=split_dir,
-                    config=config,
-                    global_seed=args.seed,
-                    synth_fn=backend.synthesize,
-                    align_fn=aligner.align,
-                    receipt_store=receipt_store,
-                    environment=environment,
-                    pronunciation_map=PRONUNCIATION_MAP,
-                    keep_intermediate=args.keep_intermediate,
-                )
-                if outcome.success:
-                    tracker.record_success(outcome.duration_seconds)
-                    manifest_lines[record.id] = manifest_line(outcome.relative_wav_path, outcome.duration_seconds)
-                else:
-                    tracker.record_failure()
-                    had_unresolved_failure = True
-                    receipt_store.mark_failed(
-                        {"id": record.id, "split": split, "reasons": outcome.reasons, "timestamp": time.time()}
-                    )
-                    print(f"FAILED {record.id}: {outcome.reasons}")
+    start_time = time.monotonic()
+    if not work_items:
+        print("Nothing to generate - everything already valid.")
+        completed, failed = 0, 0
+    elif args.workers > 1:
+        completed, failed = _run_parallel(work_items, args, config)
+    else:
+        completed, failed = _run_sequential(work_items, args, config, receipt_store)
+    elapsed_seconds = time.monotonic() - start_time
 
-            if (i + 1) % max(1, args.progress_every) == 0 or (i + 1) == len(records):
-                gpu_mem = env_info.gpu_memory_mb()
-                print(tracker.line(split, record.id, gpu_mem))
-                ordered = [manifest_lines[r.id] for r in records if r.id in manifest_lines]
-                write_split_manifest(split_dir / f"{split}.jsonl", ordered)
-
-        ordered = [manifest_lines[r.id] for r in records if r.id in manifest_lines]
-        write_split_manifest(split_dir / f"{split}.jsonl", ordered)
-        split_summaries[split] = {
-            "total": len(records),
-            "completed": len(manifest_lines),
-            "failed": len(records) - len(manifest_lines),
-        }
+    # Reload from disk: worker processes (if any) wrote receipts independently.
+    receipt_store = ReceiptStore(args.output_root / "receipts")
+    split_summaries: dict[str, dict] = {}
+    total_audio_hours = 0.0
+    for split, records in records_by_split.items():
+        split_dir = args.output_root / split
+        lines = _build_manifest_lines(records, receipt_store)
+        write_split_manifest(split_dir / f"{split}.jsonl", lines)
+        total_audio_hours += sum(l["duration"] for l in lines) / 3600.0
+        split_summaries[split] = {"total": len(records), "completed": len(lines), "failed": len(records) - len(lines)}
 
     generation_summary = {
-        "elapsed_seconds": tracker.elapsed_seconds(),
-        "completed": tracker.completed,
-        "failed": tracker.failed,
-        "audio_hours_generated": tracker.audio_seconds_generated / 3600.0,
+        "elapsed_seconds": elapsed_seconds,
+        "workers": args.workers,
+        "already_valid_skipped": already_good_count,
+        "completed_this_run": completed,
+        "failed_this_run": failed,
+        "total_audio_hours": total_audio_hours,
         "by_split": split_summaries,
         "seed": args.seed,
     }
     atomic_write_json(args.output_root / "reports" / "generation_summary.json", generation_summary)
     print(f"Generation complete: {generation_summary}")
 
-    return 1 if had_unresolved_failure else 0
+    return 1 if failed > 0 else 0
 
 
 def main(argv: list[str] | None = None) -> int:
