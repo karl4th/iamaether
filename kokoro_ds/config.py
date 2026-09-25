@@ -33,8 +33,17 @@ MIN_UTTERANCE_SECONDS = 0.05
 MAX_DIALOGUE_SECONDS = 600.0
 """Sanity ceiling; a longer assembled dialogue fails the record instead of silently succeeding."""
 
-CLIPPING_PEAK_THRESHOLD = 0.999
-"""Absolute sample value at/above this is considered clipping."""
+CLIPPING_PEAK_THRESHOLD = 1.0 + 1e-6
+"""Absolute sample value at/above this is considered clipping.
+
+A peak of exactly 1.0 is full-scale but still lossless once quantized to
+PCM16 (it maps to the exact int16 max); only a value that actually overflows
+past +/-1.0 represents real, information-losing distortion. The previous
+0.999 threshold was flagging loud-but-undistorted utterances as failures,
+which is a false positive that would loop forever on --resume (voice/speed
+are deterministic, so the same "too loud" utterance keeps regenerating
+identically). Only genuine overflow should fail a record.
+"""
 
 ALIGNMENT_MIN_CONFIDENCE = 0.55
 """Assistant utterances whose mean alignment confidence is below this are flagged for review."""

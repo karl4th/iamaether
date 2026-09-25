@@ -44,11 +44,18 @@ def get_token() -> str:
     if token:
         return token
 
-    from huggingface_hub import HfFolder
+    try:
+        from huggingface_hub import get_token as hf_get_token  # huggingface_hub >= 0.24
 
-    token = HfFolder.get_token()
-    if token:
-        return token
+        token = hf_get_token()
+        if token:
+            return token
+    except ImportError:
+        from huggingface_hub import HfFolder  # huggingface_hub < 0.24
+
+        token = HfFolder.get_token()
+        if token:
+            return token
 
     raise RuntimeError(
         "No HF token found. Set it in Colab Secrets as HF_TOKEN, export HF_TOKEN, "
