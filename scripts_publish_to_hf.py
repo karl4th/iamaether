@@ -32,11 +32,19 @@ def get_token() -> str:
     try:
         from google.colab import userdata  # type: ignore
 
-        token = userdata.get("HF_TOKEN")
-        if token:
-            return token
-    except Exception:  # noqa: BLE001 - not in Colab, or secret not set
-        pass
+        try:
+            token = userdata.get("HF_TOKEN")
+            if token:
+                return token
+        except userdata.NotebookAccessError:
+            print(
+                "Colab Secrets has HF_TOKEN, but this notebook doesn't have access to it. "
+                "Open the key icon in the left sidebar, find HF_TOKEN, and enable 'Notebook access'."
+            )
+        except userdata.SecretNotFoundError:
+            print("No Colab Secret named exactly 'HF_TOKEN' was found (checked for a typo?).")
+    except ImportError:
+        pass  # not running in Colab
 
     import os
 
