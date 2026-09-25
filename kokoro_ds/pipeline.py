@@ -165,7 +165,7 @@ def generate_one_record(
 
     source_dict = _record_to_source_dict(record)
     source_checksum = source_dialogue_checksum(source_dict)
-    config_checksum = generation_config_checksum(config.as_dict(), split, user_voice)
+    config_checksum = generation_config_checksum(config.audio_affecting_dict(), split, user_voice)
     wav_checksum = sha256_file(wav_path)
 
     companion = {

@@ -125,6 +125,23 @@ def test_resume_rejects_when_config_changed(tmp_path, stub_synth_fn, stub_align_
     assert any("config_checksum" in r for r in result.reasons)
 
 
+def test_resume_ignores_qa_gate_only_config_changes(tmp_path, stub_synth_fn, stub_align_fn):
+    """Tuning a post-hoc QA gate (never baked into the audio) must never force a re-verify."""
+    record = make_record("batch_0001_0007b")
+    split_dir = tmp_path / "train"
+    receipt_store = ReceiptStore(tmp_path / "receipts")
+    _generate(record, "train", split_dir, receipt_store, stub_synth_fn, stub_align_fn, config=DEFAULT_CONFIG)
+
+    changed_config = replace(
+        DEFAULT_CONFIG,
+        clipping_peak_threshold=DEFAULT_CONFIG.clipping_peak_threshold * 2,
+        alignment_min_confidence=DEFAULT_CONFIG.alignment_min_confidence + 0.3,
+    )
+    user_voice = assign_user_voice(record.id, "train", 0)
+    result = verify_existing_record(split_dir, record, "train", user_voice, changed_config, receipt_store)
+    assert result.ok, result.reasons
+
+
 def test_resume_rejects_missing_files(tmp_path):
     record = make_record("batch_0001_0008")
     split_dir = tmp_path / "train"

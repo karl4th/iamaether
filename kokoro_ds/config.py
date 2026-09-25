@@ -84,5 +84,28 @@ class GenerationConfig:
             "alignment_min_confidence": self.alignment_min_confidence,
         }
 
+    def audio_affecting_dict(self) -> dict:
+        """The subset of config that actually changes the bytes written to a WAV/alignment.
+
+        Used for the resume/receipt checksum. ``clipping_peak_threshold`` and
+        ``alignment_min_confidence`` are post-hoc QA gates/flags only -- they
+        never change what gets synthesized -- so tuning them must never
+        invalidate (force a full-dataset re-verify of) already-correct
+        previously generated audio.
+        """
+        return {
+            "config_version": self.config_version,
+            "sample_rate": self.sample_rate,
+            "channels": self.channels,
+            "assistant_voice": self.assistant_voice,
+            "assistant_speed": self.assistant_speed,
+            "user_speed_min": self.user_speed_min,
+            "user_speed_max": self.user_speed_max,
+            "pause_min_seconds": self.pause_min_seconds,
+            "pause_max_seconds": self.pause_max_seconds,
+            "fade_seconds": self.fade_seconds,
+            "inter_chunk_pause_seconds": self.inter_chunk_pause_seconds,
+        }
+
 
 DEFAULT_CONFIG = GenerationConfig()

@@ -129,7 +129,7 @@ def verify_existing_record(
         expected_source = source_dialogue_checksum(
             {"id": record.id, "category": record.category, "turns": [{"speaker": t.speaker, "text": t.text} for t in record.turns]}
         )
-        expected_config = generation_config_checksum(config.as_dict(), split, user_voice)
+        expected_config = generation_config_checksum(config.audio_affecting_dict(), split, user_voice)
         if receipt.get("source_checksum") != expected_source:
             reasons.append("receipt source_checksum does not match current source record")
         if receipt.get("config_checksum") != expected_config:
