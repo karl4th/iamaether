@@ -116,6 +116,22 @@ def rms_amplitude(samples: np.ndarray) -> float:
     return float(np.sqrt(np.mean(np.square(samples, dtype=np.float64))))
 
 
+def prevent_overflow(samples: np.ndarray, ceiling: float = 0.98) -> np.ndarray:
+    """Scale down only if the signal actually overflows +/-1.0; a no-op otherwise.
+
+    Some neural vocoders (including Kokoro's) occasionally produce a raw
+    waveform peak slightly above full scale for certain inputs. That is a
+    pure gain issue, not a content or timing problem, so a single uniform
+    gain reduction (rather than failing an otherwise-good utterance) is the
+    correct fix; it does not shift any sample's position in time, so forced
+    alignment computed on the pre-scaled waveform remains valid.
+    """
+    peak = peak_amplitude(samples)
+    if peak <= 1.0 or peak == 0.0:
+        return samples
+    return samples * (ceiling / peak)
+
+
 def is_clipping(samples: np.ndarray, threshold: float) -> bool:
     return peak_amplitude(samples) >= threshold
 

@@ -11,6 +11,7 @@ from kokoro_ds.audio_ops import (
     has_speech,
     is_clipping,
     peak_amplitude,
+    prevent_overflow,
     rms_amplitude,
 )
 
@@ -116,6 +117,36 @@ def test_has_speech_and_all_finite():
     bad = const_wave(0.1, 0.1)
     bad[0] = np.nan
     assert not all_finite(bad)
+
+
+def test_prevent_overflow_is_noop_when_within_range():
+    wave = const_wave(0.1, 0.8)
+    result = prevent_overflow(wave)
+    assert np.array_equal(result, wave)
+
+
+def test_prevent_overflow_is_noop_at_exactly_full_scale():
+    wave = const_wave(0.1, 1.0)
+    result = prevent_overflow(wave)
+    assert np.array_equal(result, wave)
+
+
+def test_prevent_overflow_scales_down_true_overflow():
+    wave = const_wave(0.1, 1.2)
+    result = prevent_overflow(wave, ceiling=0.98)
+    assert peak_amplitude(result) == pytest.approx(0.98, abs=1e-6)
+
+
+def test_prevent_overflow_preserves_shape_relative_to_original():
+    wave = np.array([0.5, -1.2, 1.2, -0.3], dtype=np.float32)
+    result = prevent_overflow(wave, ceiling=0.98)
+    scale = 0.98 / 1.2
+    assert np.allclose(result, wave * scale, atol=1e-6)
+
+
+def test_prevent_overflow_handles_all_zero_signal():
+    wave = np.zeros(100, dtype=np.float32)
+    assert np.array_equal(prevent_overflow(wave), wave)
 
 
 def test_float_to_pcm16_clips_and_scales():

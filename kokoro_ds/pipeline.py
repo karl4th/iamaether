@@ -21,6 +21,7 @@ from .audio_ops import (
     concat_kokoro_chunks,
     is_clipping,
     peak_amplitude,
+    prevent_overflow,
     rms_amplitude,
 )
 from .checksums import generation_config_checksum, sha256_file, source_dialogue_checksum
@@ -127,7 +128,9 @@ def generate_one_record(
     if duration_seconds > MAX_DIALOGUE_SECONDS:
         return GenerationOutcome(False, record.id, [f"assembled duration {duration_seconds:.1f}s exceeds sanity ceiling"])
 
-    left, right = stereo[0], stereo[1]
+    left = prevent_overflow(stereo[0])
+    right = prevent_overflow(stereo[1])
+    stereo = np.stack([left, right], axis=0)
     if is_clipping(left, config.clipping_peak_threshold) or is_clipping(right, config.clipping_peak_threshold):
         return GenerationOutcome(False, record.id, ["clipping detected in assembled stereo audio"])
 
