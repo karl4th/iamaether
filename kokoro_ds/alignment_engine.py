@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from .text_norm import tokenize_words
+from .text_norm import normalize_word_for_mms_alignment, tokenize_words
 
 try:
     import torch
@@ -36,10 +36,6 @@ class ForcedAligner:
         self.tokenizer = bundle.get_tokenizer()
         self.aligner = bundle.get_aligner()
 
-    @staticmethod
-    def _normalize_word(word: str) -> str:
-        return "".join(ch for ch in word.lower() if ch.isalpha() or ch == "'")
-
     def align(self, samples: np.ndarray, sample_rate: int, transcript: str) -> list[tuple[str, float, float, float]]:
         """Return ``[(original_word, start_seconds, end_seconds, confidence), ...]``.
 
@@ -51,7 +47,7 @@ class ForcedAligner:
         if not original_words:
             raise ValueError(f"transcript normalizes to zero alignable words: {transcript!r}")
 
-        normalized_words = [self._normalize_word(w) for w in original_words]
+        normalized_words = [normalize_word_for_mms_alignment(w) for w in original_words]
         if any(not w for w in normalized_words):
             raise ValueError(f"one or more words normalized to empty string: {original_words!r}")
 

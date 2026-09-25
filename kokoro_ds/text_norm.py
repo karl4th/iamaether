@@ -8,7 +8,12 @@ from __future__ import annotations
 import re
 import unicodedata
 
-_WORD_RE = re.compile(r"[A-Za-z']+")
+_LATIN1_LETTER_RANGE = r"À-ÖØ-öø-ÿ"
+"""Latin-1 Supplement letters (À..ÿ), skipping × (U+00D7) and ÷ (U+00F7),
+which sit inside that block but are math symbols, not letters. Covers common
+English loanwords: sauté, café, jalapeño, naïve, résumé, etc."""
+
+_WORD_RE = re.compile(rf"[A-Za-z{_LATIN1_LETTER_RANGE}']+")
 
 _ALLOWED_EXTRA_UNICODE = {
     "‘",  # left single quote
@@ -19,6 +24,10 @@ _ALLOWED_EXTRA_UNICODE = {
     "–",  # en dash
     "…",  # ellipsis
 }
+
+_LATIN1_ACCENTED_LETTERS = frozenset(
+    chr(c) for c in (*range(0xC0, 0xD7), *range(0xD8, 0xF7), *range(0xF8, 0x100))
+)
 
 MAX_UTTERANCE_CHARS = 400
 
@@ -47,7 +56,7 @@ def has_unsupported_unicode(text: str) -> bool:
         code = ord(ch)
         if 0x20 <= code <= 0x7E:
             continue
-        if ch in _ALLOWED_EXTRA_UNICODE:
+        if ch in _ALLOWED_EXTRA_UNICODE or ch in _LATIN1_ACCENTED_LETTERS:
             continue
         return True
     return False
@@ -76,3 +85,16 @@ def has_markdown(text: str) -> bool:
 
 def is_excessively_long(text: str, max_chars: int = MAX_UTTERANCE_CHARS) -> bool:
     return len(text) > max_chars
+
+
+def normalize_word_for_mms_alignment(word: str) -> str:
+    """Transliterate a word to the plain a-z(+apostrophe) inventory MMS_FA expects.
+
+    Accented Latin letters are decomposed and their combining diacritic is
+    dropped (e.g. "Sauté" -> "saute"), so a legitimate accented English
+    loanword can still be forced-aligned. The original spelling is preserved
+    separately wherever the word is stored (see ``tokenize_words``); only the
+    aligner's input is transliterated.
+    """
+    decomposed = unicodedata.normalize("NFKD", word.lower())
+    return "".join(ch for ch in decomposed if (ch.isalpha() and ord(ch) < 128) or ch == "'")
