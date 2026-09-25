@@ -137,12 +137,13 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--no-readme", action="store_true", help="Do not generate/overwrite README.md before upload.")
     p.add_argument("--commit-message", type=str, default="Publish generated dataset")
     p.add_argument("--legacy-upload", action="store_true", help="Use upload_folder instead of upload_large_folder.")
+    p.add_argument("--token", type=str, default=None, help="HF token, passed directly instead of auto-detecting it.")
     args = p.parse_args(argv)
 
     if not args.output_root.exists():
         raise SystemExit(f"--output-root does not exist: {args.output_root}")
 
-    token = get_token()
+    token = args.token or get_token()
 
     from huggingface_hub import HfApi, create_repo
 
